@@ -29,14 +29,27 @@ module "web" {
   ami_id           = var.ami_id
   instance_type    = var.instance_type
   security_group_id = aws_security_group.my_sg.id
+  subnet_ids      = data.aws_subnets.default.ids 
   name             = "web"
 }
+
 
 module "api" {
   source           = "./modules/server"
   ami_id           = var.ami_id
   instance_type    = var.instance_type
   security_group_id = aws_security_group.my_sg.id
+  subnet_ids       = data.aws_subnets.default.ids
   name             = "api"
 }
 
+data "aws_vpc"  "default" { 
+ default = true
+}
+
+data "aws_subnets" "default" {
+ filter {
+   name  = "vpc-id"
+   values = [data.aws_vpc.default.id]
+  }
+}

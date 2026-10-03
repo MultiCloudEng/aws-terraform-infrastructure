@@ -11,3 +11,5 @@ variable "instance_type" {
 variable "ami_id" {
  default ="ami-032bb177cf15a4813"
 }
+
+
