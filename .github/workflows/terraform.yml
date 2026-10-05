@@ -1,50 +1,175 @@
 name: Terraform CI/CD
 
+# Flow:
+#   pull_request -> checks only (fmt, validate, security scan). No AWS credentials.
+#   push to main -> checks -> plan (saved to an artifact) -> manual approval
+#                   in the "production" environment -> apply THAT exact plan.
+
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default. Jobs that need AWS add id-token: write themselves.
+permissions:
+  contents: read
+
+# Never run two plans/applies against the same state at the same time,
+# and never cancel an apply halfway through.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.10.5"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: eu-north-1
 
 jobs:
-  plan:
+  checks:
+    name: Format, validate, security scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      - name: Terraform Init
-        run: terraform init
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
 
-      - name: Terraform Plan
-        run: terraform plan
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Validate main configuration (no backend, no credentials)
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: Offline tests (mocked AWS provider)
+        run: terraform test
+
+      - name: Validate bootstrap configuration
+        working-directory: bootstrap
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: Security scan (Checkov)
+        run: |
+          pip install --quiet checkov==3.2.469
+          checkov --directory . --framework terraform --config-file .checkov.yaml
+
+  plan:
+    name: Plan
+    needs: checks
+    # Only for main. Pull requests never reach a job that can assume an AWS role.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required to request the GitHub OIDC token
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC, read-only plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform init -lockfile=readonly
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -lock-timeout=120s -detailed-exitcode -out=tfplan
+          code=$?
+          set -e
+          # 0 = no changes, 2 = changes present, anything else = error
+          if [ "$code" -eq 0 ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 2 ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::terraform plan failed (exit code $code)"
+            exit "$code"
+          fi
+
+      - name: Publish plan for review
+        run: |
+          terraform show -no-color tfplan > plan.txt
+          sha256sum tfplan | tee tfplan.sha256
+          {
+            echo "## Terraform plan for ${GITHUB_SHA::7}"
+            echo "Plan file SHA-256: \`$(cut -d' ' -f1 tfplan.sha256)\`"
+            echo '```'
+            head -c 60000 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload saved plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: |
+            tfplan
+            tfplan.sha256
+            plan.txt
+          retention-days: 3
+          if-no-files-found: error
 
   apply:
+    name: Apply reviewed plan
     needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    # Required reviewers on this environment = the approval gate.
+    # The apply role only trusts jobs running in this environment.
     environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }} # same commit the plan was created from
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      - name: Terraform Init
-        run: terraform init
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Download saved plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Verify plan was not modified
+        run: sha256sum --check tfplan.sha256
+
+      - name: Configure AWS credentials (OIDC, apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform init -lockfile=readonly
+
+      # Applying a saved plan file never re-plans. If the real infrastructure or
+      # state changed since the plan was made, Terraform refuses ("stale plan")
+      # instead of applying something different from what was approved.
+      - name: terraform apply (saved plan)
+        run: terraform apply -lock-timeout=120s tfplan
