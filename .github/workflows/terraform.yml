@@ -49,7 +49,15 @@ jobs:
           terraform validate
 
       - name: Offline tests (mocked AWS provider)
-        run: terraform test
+        run: |
+          set -o pipefail
+          if ! terraform test -no-color 2>&1 | tee test.log; then
+            # Surface the failure reason as annotations (visible in the PR checks tab).
+            grep -E "Error|error|fail" test.log | head -20 | while IFS= read -r line; do
+              echo "::error title=terraform test::${line}"
+            done
+            exit 1
+          fi
 
       - name: Validate bootstrap configuration
         working-directory: bootstrap
