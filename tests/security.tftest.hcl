@@ -1,5 +1,7 @@
 # Offline tests: run with `terraform test` (or `tofu test`).
 # The AWS provider is mocked, so no credentials are needed and nothing is created.
+# "apply" is used so computed attributes get (mocked) values; with a mock provider
+# apply never talks to AWS.
 
 mock_provider "aws" {
   mock_resource "aws_launch_template" {
@@ -27,7 +29,7 @@ mock_provider "aws" {
 }
 
 run "no_inbound_access" {
-  command = plan
+  command = apply
 
   assert {
     condition     = length(aws_security_group.instances.ingress) == 0
@@ -36,7 +38,7 @@ run "no_inbound_access" {
 }
 
 run "egress_is_https_only" {
-  command = plan
+  command = apply
 
   assert {
     condition = alltrue([
@@ -48,7 +50,7 @@ run "egress_is_https_only" {
 }
 
 run "imdsv2_and_encrypted_disk" {
-  command = plan
+  command = apply
 
   assert {
     condition     = module.web.launch_template_metadata_http_tokens == "required"
@@ -62,7 +64,7 @@ run "imdsv2_and_encrypted_disk" {
 }
 
 run "ssm_instance_profile_attached" {
-  command = plan
+  command = apply
 
   assert {
     condition     = aws_iam_role_policy_attachment.ssm_core.policy_arn == "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
@@ -71,7 +73,7 @@ run "ssm_instance_profile_attached" {
 }
 
 run "default_ami_is_amazon_linux" {
-  command = plan
+  command = apply
 
   assert {
     condition     = local.ami_id == "ami-0123456789abcdef0"
