@@ -1,4 +1,5 @@
 # AWS Self-Healing Infrastructure (Terraform + GitHub Actions)
+> Built with AI assistance (Claude).
 
 Two small services (`web` and `api`) on EC2, each managed by an Auto Scaling Group that replaces failed instances automatically. Everything is defined in Terraform and deployed through a GitHub Actions pipeline: you review a saved plan, approve it, and the pipeline applies exactly that plan. There are no SSH ports and no long-lived AWS keys.
 
