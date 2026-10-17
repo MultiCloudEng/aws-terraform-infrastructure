@@ -116,6 +116,8 @@ The main configuration contains a `removed { lifecycle { destroy = false } }` bl
 
 Open a pull request. The checks run without AWS access. Merge to `main`. Review the plan in the run summary, then approve the `production` deployment. The apply job applies that exact plan.
 
+Until the bootstrap is done and `AWS_PLAN_ROLE_ARN` is set, the plan and apply jobs on `main` are **skipped** and the pipeline runs the checks only. Nothing touches AWS before the OIDC roles exist.
+
 ### Connect to an instance (no SSH)
 
 ```bash

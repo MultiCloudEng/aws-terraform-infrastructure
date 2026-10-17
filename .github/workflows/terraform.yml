@@ -74,7 +74,12 @@ jobs:
     name: Plan
     needs: checks
     # Only for main. Pull requests never reach a job that can assume an AWS role.
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # Skipped until the bootstrap has created the OIDC roles and the repository
+    # variable AWS_PLAN_ROLE_ARN is set, so main stays green before first deploy.
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_PLAN_ROLE_ARN != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
